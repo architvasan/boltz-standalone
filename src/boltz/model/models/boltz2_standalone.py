@@ -19,6 +19,7 @@ from boltz.model.modules.confidencev2 import ConfidenceModule
 from boltz.model.modules.diffusion_conditioning import DiffusionConditioning
 from boltz.model.modules.diffusionv2 import AtomDiffusion
 from boltz.model.modules.encodersv2 import RelativePositionEncoder
+from boltz.model.layers.pairformer import PairformerModule
 from boltz.model.modules.trunkv2 import (
     BFactorModule,
     ContactConditioning,
@@ -215,6 +216,69 @@ class Boltz2Standalone(nn.Module):
             cutoff_min=self.conditioning_cutoff_min,
             cutoff_max=self.conditioning_cutoff_max,
         )
+
+        # Normalization layers
+        self.s_norm = nn.LayerNorm(self.token_s)
+        self.z_norm = nn.LayerNorm(self.token_z)
+
+        # Recycling projections
+        self.s_recycle = nn.Linear(self.token_s, self.token_s, bias=False)
+        self.z_recycle = nn.Linear(self.token_z, self.token_z, bias=False)
+
+        # Initialize recycling weights
+        init.gating_init_(self.s_recycle.weight)
+        init.gating_init_(self.z_recycle.weight)
+
+        # MSA module
+        self.msa_module = MSAModule(
+            token_z=self.token_z,
+            token_s=self.token_s,
+            **self.msa_args
+        )
+
+        # Pairformer module
+        self.pairformer_module = PairformerModule(
+            self.token_s,
+            self.token_z,
+            **self.pairformer_args
+        )
+
+        # Diffusion conditioning
+        self.diffusion_conditioning = DiffusionConditioning(
+            token_s=self.token_s,
+            token_z=self.token_z,
+            atom_s=self.atom_s,
+            atom_z=self.atom_z,
+            atoms_per_window_queries=self.atoms_per_window_queries,
+            atoms_per_window_keys=self.atoms_per_window_keys,
+            atom_encoder_depth=self.score_model_args["atom_encoder_depth"],
+            atom_encoder_heads=self.score_model_args["atom_encoder_heads"],
+        )
+
+        # Diffusion module
+        self.diffusion_module = AtomDiffusion(**self.diffusion_process_args)
+
+        # Distogram module
+        self.distogram_module = DistogramModule(**self.distogram_args)
+
+        # Confidence module
+        if self.confidence_prediction:
+            self.confidence_module = ConfidenceModule(**self.confidence_model_args)
+
+        # Affinity module
+        if self.affinity_prediction:
+            self.affinity_module = AffinityModule(**self.affinity_args)
+
+        # B-factor module
+        if self.predict_bfactor:
+            self.bfactor_module = BFactorModule(**self.bfactor_args)
+
+        # Template modules
+        if self.use_templates:
+            if self.use_templates_v2:
+                self.template_module = TemplateV2Module(**self.template_args)
+            else:
+                self.template_module = TemplateModule(**self.template_args)
 
         # MSA module
         if not self.no_msa:
