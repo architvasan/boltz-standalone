@@ -88,6 +88,11 @@ class Boltz2Standalone(nn.Module):
         use_no_atom_char: bool = False,
         use_atom_backbone_feat: bool = False,
         use_residue_feats_atoms: bool = False,
+        fix_sym_check: bool = False,
+        cyclic_pos_enc: bool = False,
+        bond_type_feature: bool = False,
+        conditioning_cutoff_min: float = 4.0,
+        conditioning_cutoff_max: float = 20.0,
         **kwargs  # Accept any additional arguments
     ) -> None:
         super().__init__()
@@ -118,6 +123,11 @@ class Boltz2Standalone(nn.Module):
         self.use_no_atom_char = use_no_atom_char
         self.use_atom_backbone_feat = use_atom_backbone_feat
         self.use_residue_feats_atoms = use_residue_feats_atoms
+        self.fix_sym_check = fix_sym_check
+        self.cyclic_pos_enc = cyclic_pos_enc
+        self.bond_type_feature = bond_type_feature
+        self.conditioning_cutoff_min = conditioning_cutoff_min
+        self.conditioning_cutoff_max = conditioning_cutoff_max
         self.msa_args = msa_args
         self.pairformer_args = pairformer_args
         self.score_model_args = score_model_args
@@ -181,10 +191,30 @@ class Boltz2Standalone(nn.Module):
         }
         self.input_embedder = InputEmbedder(**full_embedder_args)
 
-        # Initial embeddings
-        self.s_init = nn.Linear(self.input_embedder.s_inputs, self.token_s)
-        self.z_init_1 = nn.Linear(self.input_embedder.s_inputs, self.token_z)
-        self.z_init_2 = nn.Linear(self.input_embedder.s_inputs, self.token_z)
+        # Initial embeddings (Boltz2 uses token_s directly, not input_embedder.s_inputs)
+        self.s_init = nn.Linear(self.token_s, self.token_s, bias=False)
+        self.z_init_1 = nn.Linear(self.token_s, self.token_z, bias=False)
+        self.z_init_2 = nn.Linear(self.token_s, self.token_z, bias=False)
+
+        # Relative position encoder
+        self.rel_pos = RelativePositionEncoder(
+            self.token_z,
+            fix_sym_check=self.fix_sym_check,
+            cyclic_pos_enc=self.cyclic_pos_enc
+        )
+
+        # Token bonds
+        self.token_bonds = nn.Linear(1, self.token_z, bias=False)
+        if self.bond_type_feature:
+            from boltz.data import const
+            self.token_bonds_type = nn.Embedding(len(const.bond_types) + 1, self.token_z)
+
+        # Contact conditioning
+        self.contact_conditioning = ContactConditioning(
+            token_z=self.token_z,
+            cutoff_min=self.conditioning_cutoff_min,
+            cutoff_max=self.conditioning_cutoff_max,
+        )
 
         # MSA module
         if not self.no_msa:
