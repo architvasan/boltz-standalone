@@ -119,8 +119,19 @@ class Boltz1Standalone(nn.Module):
 
     def _init_modules(self):
         """Initialize all model modules."""
-        # Input embedder
-        self.input_embedder = InputEmbedder(**self.embedder_args)
+        # Input embedder - need to pass required parameters
+        full_embedder_args = {
+            "atom_s": self.atom_s,
+            "atom_z": self.atom_z,
+            "token_s": self.token_s,
+            "token_z": self.token_z,
+            "atoms_per_window_queries": self.atoms_per_window_queries,
+            "atoms_per_window_keys": self.atoms_per_window_keys,
+            "atom_feature_dim": self.atom_feature_dim,
+            "no_atom_encoder": self.no_atom_encoder,
+            **self.embedder_args,
+        }
+        self.input_embedder = InputEmbedder(**full_embedder_args)
 
         # Initial embeddings
         self.s_init = nn.Linear(self.input_embedder.s_inputs, self.token_s)

@@ -85,6 +85,9 @@ class Boltz2Standalone(nn.Module):
         use_templates_v2: bool = False,
         use_kernels: bool = False,
         affinity_mw_correction: Optional[bool] = False,
+        use_no_atom_char: bool = False,
+        use_atom_backbone_feat: bool = False,
+        use_residue_feats_atoms: bool = False,
         **kwargs  # Accept any additional arguments
     ) -> None:
         super().__init__()
@@ -98,6 +101,23 @@ class Boltz2Standalone(nn.Module):
         self.training_args = training_args
         self.validation_args = validation_args
         self.embedder_args = embedder_args
+
+        # Store additional parameters needed for InputEmbedder
+        self.atom_feature_dim = atom_feature_dim
+        self.atoms_per_window_queries = atoms_per_window_queries
+        self.atoms_per_window_keys = atoms_per_window_keys
+
+        # Store other parameters that might be needed
+        self.confidence_prediction = confidence_prediction
+        self.affinity_prediction = affinity_prediction
+        self.structure_prediction_training = structure_prediction_training
+        self.use_templates = use_templates
+        self.use_templates_v2 = use_templates_v2
+        self.predict_bfactor = predict_bfactor
+        self.affinity_mw_correction = affinity_mw_correction
+        self.use_no_atom_char = use_no_atom_char
+        self.use_atom_backbone_feat = use_atom_backbone_feat
+        self.use_residue_feats_atoms = use_residue_feats_atoms
         self.msa_args = msa_args
         self.pairformer_args = pairformer_args
         self.score_model_args = score_model_args
@@ -145,8 +165,21 @@ class Boltz2Standalone(nn.Module):
 
     def _init_modules(self):
         """Initialize all model modules."""
-        # Input embedder
-        self.input_embedder = InputEmbedder(**self.embedder_args)
+        # Input embedder - need to pass required parameters
+        full_embedder_args = {
+            "atom_s": self.atom_s,
+            "atom_z": self.atom_z,
+            "token_s": self.token_s,
+            "token_z": self.token_z,
+            "atoms_per_window_queries": self.atoms_per_window_queries,
+            "atoms_per_window_keys": self.atoms_per_window_keys,
+            "atom_feature_dim": self.atom_feature_dim,
+            "use_no_atom_char": self.use_no_atom_char,
+            "use_atom_backbone_feat": self.use_atom_backbone_feat,
+            "use_residue_feats_atoms": self.use_residue_feats_atoms,
+            **self.embedder_args,
+        }
+        self.input_embedder = InputEmbedder(**full_embedder_args)
 
         # Initial embeddings
         self.s_init = nn.Linear(self.input_embedder.s_inputs, self.token_s)
