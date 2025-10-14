@@ -46,7 +46,23 @@ def load_model_from_checkpoint(
         raise FileNotFoundError(f"Checkpoint file not found: {checkpoint_path}")
     
     # Load the checkpoint to inspect it
-    checkpoint = torch.load(checkpoint_path, map_location=map_location)
+    # Handle PyTorch 2.6+ security changes for Lightning checkpoints
+    try:
+        # Try with weights_only=False for Lightning checkpoints (they contain OmegaConf objects)
+        checkpoint = torch.load(checkpoint_path, map_location=map_location, weights_only=False)
+    except Exception as e:
+        # Fallback: try with safe globals if the above fails
+        try:
+            import omegaconf
+            torch.serialization.add_safe_globals([omegaconf.dictconfig.DictConfig])
+            checkpoint = torch.load(checkpoint_path, map_location=map_location, weights_only=True)
+        except Exception:
+            # Final fallback: use the original error message
+            raise RuntimeError(
+                f"Failed to load checkpoint {checkpoint_path}. "
+                f"This is likely due to PyTorch 2.6+ security changes. "
+                f"Original error: {e}"
+            ) from e
     
     # Auto-detect model type if needed
     if model_type == "auto":
@@ -166,38 +182,55 @@ def load_checkpoint_weights_only(
     map_location: str = "cpu"
 ) -> Dict[str, torch.Tensor]:
     """Load only the model weights from a checkpoint.
-    
+
     Parameters
     ----------
     checkpoint_path : Union[str, Path]
         Path to the checkpoint file.
     map_location : str
         Device to load the weights on.
-        
+
     Returns
     -------
     Dict[str, torch.Tensor]
         The model state dict.
     """
-    checkpoint = torch.load(checkpoint_path, map_location=map_location)
+    try:
+        checkpoint = torch.load(checkpoint_path, map_location=map_location, weights_only=False)
+    except Exception:
+        try:
+            import omegaconf
+            torch.serialization.add_safe_globals([omegaconf.dictconfig.DictConfig])
+            checkpoint = torch.load(checkpoint_path, map_location=map_location, weights_only=True)
+        except Exception as e:
+            raise RuntimeError(f"Failed to load checkpoint {checkpoint_path}: {e}") from e
+
     state_dict = checkpoint.get("state_dict", {})
     return convert_lightning_state_dict(state_dict)
 
 
 def get_checkpoint_info(checkpoint_path: Union[str, Path]) -> Dict[str, Any]:
     """Get information about a checkpoint file.
-    
+
     Parameters
     ----------
     checkpoint_path : Union[str, Path]
         Path to the checkpoint file.
-        
+
     Returns
     -------
     Dict[str, Any]
         Information about the checkpoint including model type, hyperparameters, etc.
     """
-    checkpoint = torch.load(checkpoint_path, map_location="cpu")
+    try:
+        checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+    except Exception:
+        try:
+            import omegaconf
+            torch.serialization.add_safe_globals([omegaconf.dictconfig.DictConfig])
+            checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
+        except Exception as e:
+            raise RuntimeError(f"Failed to load checkpoint {checkpoint_path}: {e}") from e
     
     info = {
         "model_type": detect_model_type(checkpoint),
@@ -217,21 +250,28 @@ def validate_checkpoint_compatibility(
     model_type: str
 ) -> bool:
     """Validate that a checkpoint is compatible with the specified model type.
-    
+
     Parameters
     ----------
     checkpoint_path : Union[str, Path]
         Path to the checkpoint file.
     model_type : str
         Expected model type ("boltz1" or "boltz2").
-        
+
     Returns
     -------
     bool
         True if compatible, False otherwise.
     """
     try:
-        detected_type = detect_model_type(torch.load(checkpoint_path, map_location="cpu"))
+        try:
+            checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+        except Exception:
+            import omegaconf
+            torch.serialization.add_safe_globals([omegaconf.dictconfig.DictConfig])
+            checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
+
+        detected_type = detect_model_type(checkpoint)
         return detected_type == model_type
     except Exception:
         return False

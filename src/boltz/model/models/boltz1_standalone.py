@@ -217,8 +217,16 @@ class Boltz1Standalone(nn.Module):
         Boltz1Standalone
             The loaded model.
         """
-        # Load the checkpoint
-        checkpoint = torch.load(checkpoint_path, map_location=map_location)
+        # Load the checkpoint with PyTorch 2.6+ compatibility
+        try:
+            checkpoint = torch.load(checkpoint_path, map_location=map_location, weights_only=False)
+        except Exception:
+            try:
+                import omegaconf
+                torch.serialization.add_safe_globals([omegaconf.dictconfig.DictConfig])
+                checkpoint = torch.load(checkpoint_path, map_location=map_location, weights_only=True)
+            except Exception as e:
+                raise RuntimeError(f"Failed to load checkpoint {checkpoint_path}: {e}") from e
         
         # Extract hyperparameters
         hparams = checkpoint.get("hyper_parameters", {})
