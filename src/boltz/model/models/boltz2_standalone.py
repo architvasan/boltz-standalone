@@ -255,8 +255,19 @@ class Boltz2Standalone(nn.Module):
             atom_encoder_heads=self.score_model_args["atom_encoder_heads"],
         )
 
-        # Diffusion module
-        self.diffusion_module = AtomDiffusion(**self.diffusion_process_args)
+        # Diffusion module - filter out unsupported parameters
+        supported_diffusion_params = {
+            'score_model_args', 'num_sampling_steps', 'sigma_min', 'sigma_max',
+            'sigma_data', 'rho', 'P_mean', 'P_std', 'gamma_0', 'gamma_min',
+            'noise_scale', 'step_scale', 'step_scale_random', 'coordinate_augmentation',
+            'coordinate_augmentation_inference', 'compile_score', 'alignment_reverse_diff',
+            'synchronize_sigmas'
+        }
+        filtered_diffusion_args = {
+            k: v for k, v in self.diffusion_process_args.items()
+            if k in supported_diffusion_params
+        }
+        self.diffusion_module = AtomDiffusion(**filtered_diffusion_args)
 
         # Distogram module
         self.distogram_module = DistogramModule(**self.distogram_args)
