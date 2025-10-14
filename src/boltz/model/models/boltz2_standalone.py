@@ -60,9 +60,15 @@ class Boltz2Standalone(nn.Module):
         template_args: Optional[dict] = None,
         confidence_prediction: bool = True,
         affinity_prediction: bool = False,
+        affinity_ensemble: bool = False,
+        run_trunk_and_structure: bool = True,
+        skip_run_structure: bool = False,
+        token_level_confidence: bool = True,
         structure_prediction_training: bool = True,
+        validate_structure: bool = True,
         confidence_imitate_trunk: bool = False,
         alpha_pae: float = 0.0,
+        exclude_ions_from_lddt: bool = False,
         atoms_per_window_queries: int = 32,
         atoms_per_window_keys: int = 128,
         compile_pairformer: bool = False,
@@ -86,6 +92,8 @@ class Boltz2Standalone(nn.Module):
         use_templates_v2: bool = False,
         use_kernels: bool = False,
         affinity_mw_correction: Optional[bool] = False,
+        aggregate_distogram: bool = True,
+        no_random_recycling_training: bool = False,
         use_no_atom_char: bool = False,
         use_atom_backbone_feat: bool = False,
         use_residue_feats_atoms: bool = False,
@@ -133,6 +141,16 @@ class Boltz2Standalone(nn.Module):
         self.conditioning_cutoff_max = conditioning_cutoff_max
         self.compile_affinity = compile_affinity
         self.compile_msa = compile_msa
+
+        # Store additional instance attributes like original Boltz2
+        self.affinity_ensemble = affinity_ensemble
+        self.run_trunk_and_structure = run_trunk_and_structure
+        self.skip_run_structure = skip_run_structure
+        self.token_level_confidence = token_level_confidence
+        self.validate_structure = validate_structure
+        self.exclude_ions_from_lddt = exclude_ions_from_lddt
+        self.aggregate_distogram = aggregate_distogram
+        self.no_random_recycling_training = no_random_recycling_training
         self.msa_args = msa_args
         self.pairformer_args = pairformer_args
         self.score_model_args = score_model_args
@@ -288,26 +306,76 @@ class Boltz2Standalone(nn.Module):
         )
 
         # Distogram module
-        self.distogram_module = DistogramModule(**self.distogram_args)
+        self.distogram_module = DistogramModule(
+            self.token_z,
+            self.num_bins,
+        )
+
+        # Store instance attributes like original Boltz2 (predict_bfactor already stored in __init__)
+        if self.predict_bfactor:
+            self.bfactor_module = BFactorModule(self.token_s, self.num_bins)
 
         # Confidence module
         if self.confidence_prediction:
-            self.confidence_module = ConfidenceModule(**self.confidence_model_args)
+            self.confidence_module = ConfidenceModule(
+                self.token_s,
+                self.token_z,
+                token_level_confidence=self.token_level_confidence,
+                bond_type_feature=self.bond_type_feature,
+                fix_sym_check=self.fix_sym_check,
+                cyclic_pos_enc=self.cyclic_pos_enc,
+                conditioning_cutoff_min=self.conditioning_cutoff_min,
+                conditioning_cutoff_max=self.conditioning_cutoff_max,
+                **self.confidence_model_args,
+            )
+            if self.compile_confidence:
+                self.confidence_module = torch.compile(
+                    self.confidence_module, dynamic=False, fullgraph=False
+                )
 
         # Affinity module
         if self.affinity_prediction:
-            self.affinity_module = AffinityModule(**self.affinity_args)
-
-        # B-factor module
-        if self.predict_bfactor:
-            self.bfactor_module = BFactorModule(**self.bfactor_args)
+            if self.affinity_ensemble:
+                self.affinity_module1 = AffinityModule(
+                    self.token_s,
+                    self.token_z,
+                    **self.affinity_model_args1,
+                )
+                self.affinity_module2 = AffinityModule(
+                    self.token_s,
+                    self.token_z,
+                    **self.affinity_model_args2,
+                )
+                if self.compile_affinity:
+                    self.affinity_module1 = torch.compile(
+                        self.affinity_module1, dynamic=False, fullgraph=False
+                    )
+                    self.affinity_module2 = torch.compile(
+                        self.affinity_module2, dynamic=False, fullgraph=False
+                    )
+            else:
+                self.affinity_module = AffinityModule(
+                    self.token_s,
+                    self.token_z,
+                    **self.affinity_model_args,
+                )
+                if self.compile_affinity:
+                    self.affinity_module = torch.compile(
+                        self.affinity_module, dynamic=False, fullgraph=False
+                    )
 
         # Template modules
         if self.use_templates:
             if self.use_templates_v2:
-                self.template_module = TemplateV2Module(**self.template_args)
+                self.template_module = TemplateV2Module(self.token_z, **self.template_args)
             else:
-                self.template_module = TemplateModule(**self.template_args)
+                self.template_module = TemplateModule(self.token_z, **self.template_args)
+            if self.compile_templates:
+                self.template_module = torch.compile(
+                    self.template_module,
+                    dynamic=False,
+                    fullgraph=False,
+                )
 
         # MSA module
         if not self.no_msa:
@@ -533,87 +601,91 @@ class Boltz2Standalone(nn.Module):
         ):
             s_inputs = self.input_embedder(feats)
 
-            # Initialize the sequence and pairwise embeddings
+            # Initialize the sequence embeddings
             s_init = self.s_init(s_inputs)
+
+            # Initialize pairwise embeddings
             z_init = (
                 self.z_init_1(s_inputs)[:, :, None]
                 + self.z_init_2(s_inputs)[:, None, :]
             )
+            relative_position_encoding = self.rel_pos(feats)
+            z_init = z_init + relative_position_encoding
+            z_init = z_init + self.token_bonds(feats["token_bonds"].float())
+            if self.bond_type_feature:
+                z_init = z_init + self.token_bonds_type(feats["type_bonds"].long())
+            z_init = z_init + self.contact_conditioning(feats)
 
-            # Add relative position encoding
-            z_init = z_init + self.relative_position_encoder(feats)
+            # Perform rounds of the pairwise stack
+            s = torch.zeros_like(s_init)
+            z = torch.zeros_like(z_init)
 
-            # MSA processing
-            if not self.no_msa and "msa" in feats:
-                s_msa, z_msa = self.msa_module(feats, s_init, z_init)
-                s_trunk = s_msa
-                z_trunk = z_msa
-            else:
-                s_trunk = s_init
-                z_trunk = z_init
+            # Compute pairwise mask
+            mask = feats["token_pad_mask"].float()
+            pair_mask = mask[:, :, None] * mask[:, None, :]
 
-            # Template processing
-            if self.use_templates and "template" in feats:
-                s_template, z_template = self.template_module(feats, s_trunk, z_trunk)
-                s_trunk = s_template
-                z_trunk = z_template
+            if self.run_trunk_and_structure:
+                for i in range(recycling_steps + 1):
+                    with torch.set_grad_enabled(
+                        self.training
+                        and self.structure_prediction_training
+                        and (i == recycling_steps)
+                    ):
+                        # Apply recycling
+                        s = s_init + self.s_recycle(self.s_norm(s))
+                        z = z_init + self.z_recycle(self.z_norm(z))
 
-            # Recycling loop
-            for _ in range(recycling_steps + 1):
-                # Pairformer
-                s_trunk, z_trunk = self.pairformer_module(
-                    s_trunk, z_trunk, feats
-                )
+                        # Compute pairwise stack
+                        if self.use_templates:
+                            template_module = self.template_module
+                            z = template_module(feats, z, pair_mask)
 
-            # Distogram prediction
-            distogram_logits = self.distogram_module(z_trunk)
-            dict_out["distogram_logits"] = distogram_logits
+                        # MSA module
+                        z = self.msa_module(feats, s, z, pair_mask)
 
-            # Contact conditioning
-            z_conditioned = self.contact_conditioning(z_trunk, feats)
+                        # Pairformer module
+                        s, z = self.pairformer_module(s, z, pair_mask)
 
-            # Diffusion conditioning
-            s_conditioned, z_conditioned = self.diffusion_conditioning(
-                s_trunk, z_conditioned, feats
-            )
+                # Structure prediction
+                if not self.skip_run_structure:
+                    dict_out.update(
+                        self.structure_module(
+                            feats,
+                            s,
+                            z,
+                            num_sampling_steps=num_sampling_steps,
+                            diffusion_samples=diffusion_samples,
+                            max_parallel_samples=max_parallel_samples,
+                        )
+                    )
 
-            # Structure prediction
-            structure_out = self.structure_module(
-                s_conditioned,
-                z_conditioned,
-                feats,
-                num_sampling_steps=num_sampling_steps,
-                multiplicity_diffusion_train=multiplicity_diffusion_train,
-                diffusion_samples=diffusion_samples,
-                max_parallel_samples=max_parallel_samples,
-            )
-            dict_out.update(structure_out)
+                # Distogram prediction
+                dict_out["distogram"] = self.distogram_module(z)
 
-            # Confidence prediction
-            if self.confidence_prediction:
-                confidence_out = self.confidence_module(
-                    s_trunk,
-                    z_trunk,
-                    feats,
-                    structure_out.get("coords", None),
-                    run_sequentially=run_confidence_sequentially,
-                )
-                dict_out.update(confidence_out)
+                # Confidence prediction
+                if self.confidence_prediction:
+                    dict_out.update(
+                        self.confidence_module(
+                            feats,
+                            s,
+                            z,
+                            dict_out.get("atom_positions"),
+                            run_confidence_sequentially=run_confidence_sequentially,
+                        )
+                    )
 
-            # Affinity prediction
-            if self.affinity_prediction:
-                affinity_out = self.affinity_module(
-                    s_trunk,
-                    z_trunk,
-                    feats,
-                    structure_out.get("coords", None),
-                )
-                dict_out.update(affinity_out)
+                # Affinity prediction
+                if self.affinity_prediction:
+                    if self.affinity_ensemble:
+                        affinity_out1 = self.affinity_module1(feats, s, z)
+                        affinity_out2 = self.affinity_module2(feats, s, z)
+                        dict_out["affinity"] = (affinity_out1["affinity"] + affinity_out2["affinity"]) / 2
+                    else:
+                        dict_out.update(self.affinity_module(feats, s, z))
 
-            # B-factor prediction
-            if self.predict_bfactor:
-                bfactor_out = self.bfactor_module(s_trunk)
-                dict_out.update(bfactor_out)
+                # B-factor prediction
+                if self.predict_bfactor:
+                    dict_out["bfactor"] = self.bfactor_module(s)
 
         return dict_out
 
