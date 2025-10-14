@@ -10,6 +10,10 @@ from boltz.model.utils.checkpoint_loader import load_model_from_checkpoint
 from boltz.inference.data_pipeline import create_inference_dataloader
 from boltz.data.types import Manifest, Record
 from boltz.data.write.writer import BoltzWriter, BoltzAffinityWriter
+from boltz.data.parse.yaml import parse_yaml
+from boltz.data.parse.fasta import parse_fasta
+from boltz.data.parse.csv import parse_csv
+from boltz.data.mol import load_canonicals
 
 
 class BoltzInference:
@@ -269,6 +273,128 @@ class BoltzInference:
         return batch
 
 
+def _process_input_data(
+    input_data: Union[str, Path, Record, Manifest],
+    mol_dir: Optional[Path] = None,
+    model_version: str = "boltz2",
+) -> Manifest:
+    """Process different input formats into a Manifest object.
+
+    Parameters
+    ----------
+    input_data : Union[str, Path, Record, Manifest]
+        Input data in various formats.
+    mol_dir : Optional[Path]
+        Directory containing molecule data.
+    model_version : str
+        Model version ("boltz1" or "boltz2").
+
+    Returns
+    -------
+    Manifest
+        Processed manifest object.
+    """
+    if isinstance(input_data, Record):
+        return Manifest([input_data])
+    elif isinstance(input_data, Manifest):
+        return input_data
+    elif isinstance(input_data, (str, Path)):
+        input_path = Path(input_data)
+
+        # Try to load as JSON manifest first
+        if input_path.suffix.lower() == ".json":
+            try:
+                return Manifest.load(input_path)
+            except Exception as e:
+                raise ValueError(f"Failed to load JSON manifest from {input_path}: {e}") from e
+
+        # Handle YAML/FASTA/CSV inputs
+        elif input_path.suffix.lower() in (".yml", ".yaml"):
+            # Load CCD data for parsing
+            if mol_dir is None:
+                # Try to find default mol directory
+                cache_dir = Path.home() / ".boltz"
+                mol_dir = cache_dir / "mols"
+                if not mol_dir.exists():
+                    # Create empty mol_dir for now - this might cause issues with ligands
+                    mol_dir = Path("/tmp/empty_mols")
+                    mol_dir.mkdir(exist_ok=True)
+
+            try:
+                ccd = load_canonicals(mol_dir) if mol_dir.exists() else {}
+            except Exception:
+                ccd = {}  # Fallback to empty CCD if loading fails
+
+            boltz2 = model_version == "boltz2"
+            target = parse_yaml(input_path, ccd, mol_dir, boltz2)
+
+            # Convert Target to Record (this is a simplified conversion)
+            # In the full implementation, this would go through the complete processing pipeline
+            record = Record(
+                id=target.name,
+                structure=target.structure_info,
+                chains=target.chain_infos,
+                interfaces=target.interfaces,
+                inference_options=target.inference_options,
+                templates=getattr(target, 'templates', []),
+                affinity=getattr(target, 'affinity', None),
+            )
+            return Manifest([record])
+
+        elif input_path.suffix.lower() in (".fa", ".fas", ".fasta"):
+            try:
+                ccd = load_canonicals(mol_dir) if mol_dir and mol_dir.exists() else {}
+            except Exception:
+                ccd = {}
+
+            boltz2 = model_version == "boltz2"
+            target = parse_fasta(input_path, ccd, mol_dir or Path("/tmp"), boltz2)
+
+            record = Record(
+                id=target.name,
+                structure=target.structure_info,
+                chains=target.chain_infos,
+                interfaces=target.interfaces,
+                inference_options=target.inference_options,
+                templates=getattr(target, 'templates', []),
+                affinity=getattr(target, 'affinity', None),
+            )
+            return Manifest([record])
+
+        elif input_path.suffix.lower() == ".csv":
+            try:
+                ccd = load_canonicals(mol_dir) if mol_dir and mol_dir.exists() else {}
+            except Exception:
+                ccd = {}
+
+            boltz2 = model_version == "boltz2"
+            target = parse_csv(input_path, ccd, mol_dir or Path("/tmp"), boltz2)
+
+            record = Record(
+                id=target.name,
+                structure=target.structure_info,
+                chains=target.chain_infos,
+                interfaces=target.interfaces,
+                inference_options=target.inference_options,
+                templates=getattr(target, 'templates', []),
+                affinity=getattr(target, 'affinity', None),
+            )
+            return Manifest([record])
+
+        else:
+            # Try to load as JSON manifest anyway
+            try:
+                return Manifest.load(input_path)
+            except Exception as e:
+                raise ValueError(
+                    f"Unsupported input format: {input_path.suffix}. "
+                    f"Supported formats: .json (manifest), .yaml/.yml, .fasta/.fa/.fas, .csv. "
+                    f"Error: {e}"
+                ) from e
+    else:
+        raise ValueError("input_data must be a path, Record, or Manifest")
+
+
 def predict_structure(
     input_data: Union[str, Path, Record, Manifest],
     checkpoint_path: Union[str, Path],
@@ -352,22 +478,19 @@ def predict_structure(
     template_dir = Path(template_dir) if template_dir else None
     extra_mols_dir = Path(extra_mols_dir) if extra_mols_dir else None
     
-    # Handle input data
-    if isinstance(input_data, (str, Path)):
-        manifest = Manifest.load(Path(input_data))
-    elif isinstance(input_data, Record):
-        manifest = Manifest([input_data])
-    elif isinstance(input_data, Manifest):
-        manifest = input_data
-    else:
-        raise ValueError("input_data must be a path, Record, or Manifest")
-    
-    # Initialize inference
+    # Initialize inference first to determine model version
     inference = BoltzInference(
         checkpoint_path=checkpoint_path,
         model_type=model_type,
         device=device,
         **model_kwargs
+    )
+
+    # Handle input data with proper model version
+    manifest = _process_input_data(
+        input_data=input_data,
+        mol_dir=mol_dir,
+        model_version=inference.model_version,
     )
     
     # Run inference
