@@ -94,6 +94,8 @@ class Boltz2Standalone(nn.Module):
         bond_type_feature: bool = False,
         conditioning_cutoff_min: float = 4.0,
         conditioning_cutoff_max: float = 20.0,
+        compile_affinity: bool = False,
+        compile_msa: bool = False,
         **kwargs  # Accept any additional arguments
     ) -> None:
         super().__init__()
@@ -129,6 +131,8 @@ class Boltz2Standalone(nn.Module):
         self.bond_type_feature = bond_type_feature
         self.conditioning_cutoff_min = conditioning_cutoff_min
         self.conditioning_cutoff_max = conditioning_cutoff_max
+        self.compile_affinity = compile_affinity
+        self.compile_msa = compile_msa
         self.msa_args = msa_args
         self.pairformer_args = pairformer_args
         self.score_model_args = score_model_args
@@ -255,9 +259,18 @@ class Boltz2Standalone(nn.Module):
             atom_encoder_heads=self.score_model_args["atom_encoder_heads"],
         )
 
-        # Diffusion module - filter out unsupported parameters
+        # Structure module (AtomDiffusion) - construct score_model_args like original Boltz2
+        structure_score_model_args = {
+            "token_s": self.token_s,
+            "atom_s": self.atom_s,
+            "atoms_per_window_queries": self.atoms_per_window_queries,
+            "atoms_per_window_keys": self.atoms_per_window_keys,
+            **self.score_model_args,
+        }
+
+        # Filter out unsupported diffusion parameters
         supported_diffusion_params = {
-            'score_model_args', 'num_sampling_steps', 'sigma_min', 'sigma_max',
+            'num_sampling_steps', 'sigma_min', 'sigma_max',
             'sigma_data', 'rho', 'P_mean', 'P_std', 'gamma_0', 'gamma_min',
             'noise_scale', 'step_scale', 'step_scale_random', 'coordinate_augmentation',
             'coordinate_augmentation_inference', 'compile_score', 'alignment_reverse_diff',
@@ -267,7 +280,12 @@ class Boltz2Standalone(nn.Module):
             k: v for k, v in self.diffusion_process_args.items()
             if k in supported_diffusion_params
         }
-        self.diffusion_module = AtomDiffusion(**filtered_diffusion_args)
+
+        self.structure_module = AtomDiffusion(
+            score_model_args=structure_score_model_args,
+            compile_score=self.compile_structure,
+            **filtered_diffusion_args
+        )
 
         # Distogram module
         self.distogram_module = DistogramModule(**self.distogram_args)
