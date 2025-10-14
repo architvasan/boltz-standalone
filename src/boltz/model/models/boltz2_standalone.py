@@ -304,7 +304,7 @@ class Boltz2Standalone(nn.Module):
                 )
 
         # Pairformer module (trunk)
-        from boltz.model.modules.trunkv2 import PairformerModule
+        #from boltz.model.modules.trunkv2 import PairformerModule
         self.pairformer_module = PairformerModule(
             token_s=self.token_s,
             token_z=self.token_z,
